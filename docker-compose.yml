@@ -1,0 +1,37 @@
+# ============================================================
+# PDF Service — Docker Compose
+# 一键部署: docker compose up -d
+# ============================================================
+services:
+  pdf-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf-service-8912
+    restart: unless-stopped
+    ports:
+      - "8912:8912"
+    volumes:
+      # 输出文件持久化到宿主机
+      - ./pdf-service-output:/app/pdf-service-output
+    environment:
+      # --- Aliyun OSS 上传配置（通过 .env 文件配置） ---
+      - OSS_ENABLED=${OSS_ENABLED:-false}
+      - OSS_ACCESS_KEY_ID=${OSS_ACCESS_KEY_ID}
+      - OSS_ACCESS_KEY_SECRET=${OSS_ACCESS_KEY_SECRET}
+      - OSS_BUCKET=${OSS_BUCKET}
+      - OSS_ENDPOINT=${OSS_ENDPOINT:-oss-cn-shenzhen.aliyuncs.com}
+      - OSS_INTERNAL_ENDPOINT=${OSS_INTERNAL_ENDPOINT:-}
+      - OSS_PATH_PREFIX=${OSS_PATH_PREFIX:-lab/evaluation/export}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8912/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+

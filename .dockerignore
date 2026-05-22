@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.env
+
+# Docker
+docker-compose*.yml
+.dockerignore
+!Dockerfile
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+*.pid
+
+# Output
+pdf-service-output/*
+!pdf-service-output/.gitkeep
+
+# Script
+deploy.bat
+deploy.sh

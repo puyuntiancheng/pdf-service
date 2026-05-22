@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Output
+pdf-service-output/
+
+# Python
+__pycache__/
+*.pyc
+
+# Docker
+*.tar
+proxy.py\nrender_worker.py
