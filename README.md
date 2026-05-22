@@ -43,7 +43,7 @@ pdf-service-docker/
 1. 打开命令提示符或 PowerShell，进入项目目录：
 
 ```powershell
-cd "C:\Users\Administrator\AppData\Local\hermes\hermes-agent\pdf-service-docker"
+cd "\pdf-service-docker"
 ```
 
 2. 双击运行 `deploy.bat`，按菜单提示操作：
