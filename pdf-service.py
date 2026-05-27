@@ -142,6 +142,10 @@ def render_page(
     actual_format = image_format if is_image else None
     actual_scale = scale if is_image else None
 
+    # Use reasonable initial viewport height (1024) instead of 0
+    # to avoid layout issues with vh/CSS/JS-dependent elements
+    initial_height = height if height > 0 else 1024
+
     node_script = f"""
 const {{ chromium }} = require('playwright');
 
@@ -153,19 +157,40 @@ const {{ chromium }} = require('playwright');
   }});
 
   const page = await browser.newPage({{
-    viewport: {{ width: {width}, height: {height}, deviceScaleFactor: {json.dumps(actual_scale) if actual_scale else 2.0} }},
+    viewport: {{ width: {width}, height: {initial_height}, deviceScaleFactor: {json.dumps(actual_scale) if actual_scale else 2.0} }},
     userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
   }});
 
   console.log('Loading:', {json.dumps(url)});
   await page.goto({json.dumps(url)}, {{ waitUntil: 'networkidle', timeout: 90000 }});
-  await page.waitForTimeout(6000);
 
-  // Remove overflow constraints
+  // Wait for fonts + images to load, then short buffer for framework hydration
+  try {{
+    await page.waitForFunction(() => {{
+      const fontsDone = !document.fonts || document.fonts.status === 'loaded';
+      const imagesDone = Array.from(document.images).every(img => img.complete);
+      return fontsDone && imagesDone;
+    }}, {{ timeout: 15000 }});
+  }} catch (e) {{
+    console.log('Resource wait timeout, proceeding...');
+  }}
+  await page.waitForTimeout(2000);
+
+  // Remove overflow constraints from structural containers,
+  // but preserve text-truncation overflow (ellipsis / line-clamp)
   await page.evaluate(() => {{
     const all = document.querySelectorAll('*');
     all.forEach(el => {{
       const s = window.getComputedStyle(el);
+
+      // Preserve text-truncation: text-overflow: ellipsis (single-line)
+      // and -webkit-line-clamp (multi-line)
+      const hasEllipsis = s.textOverflow === 'ellipsis';
+      const hasLineClamp = s.webkitLineClamp !== 'none' && s.webkitLineClamp !== '0';
+      if (hasEllipsis || hasLineClamp) {{
+        return; // skip text-truncation elements
+      }}
+
       if (s.overflow === 'hidden' || s.overflow === 'auto' || s.overflow === 'scroll' ||
           s.overflowY === 'hidden' || s.overflowY === 'auto' || s.overflowY === 'scroll') {{
         el.style.setProperty('overflow', 'visible', 'important');
@@ -179,7 +204,19 @@ const {{ chromium }} = require('playwright');
     document.documentElement.style.setProperty('overflow', 'visible', 'important');
   }});
 
-  await page.waitForTimeout(5000);
+  // Wait for layout to stabilize after overflow removal (max 8s)
+  let prevHeight = 0, stableCount = 0;
+  for (let i = 0; i < 40; i++) {{
+    await page.waitForTimeout(200);
+    const h = await page.evaluate(() => document.body.scrollHeight);
+    if (h === prevHeight && h > 0) {{
+      stableCount++;
+      if (stableCount >= 3) break; // stable for 600ms
+    }} else {{
+      stableCount = 0;
+    }}
+    prevHeight = h;
+  }}
 
   const actualHeight = await page.evaluate(() => Math.max(
     document.body.scrollHeight, document.body.offsetHeight,
@@ -187,13 +224,27 @@ const {{ chromium }} = require('playwright');
   ));
   console.log('Content height:', actualHeight);
 
-  const viewHeight = {height} > 0 ? {height} : Math.max(actualHeight, 6000);
-  await page.setViewportSize({{ width: {width}, height: viewHeight }});
-  await page.waitForTimeout(4000);
-
 """
     if is_pdf:
         node_script += f"""
+  // Resize viewport to full content height for PDF capture
+  const viewHeight = {height} > 0 ? {height} : Math.max(actualHeight, 6000);
+  await page.setViewportSize({{ width: {width}, height: viewHeight }});
+
+  // Wait for layout to stabilize after viewport resize (max 8s)
+  let _ph = 0, _sc = 0;
+  for (let i = 0; i < 40; i++) {{
+    await page.waitForTimeout(200);
+    const h = await page.evaluate(() => document.body.scrollHeight);
+    if (h === _ph && h > 0) {{
+      _sc++;
+      if (_sc >= 3) break;
+    }} else {{
+      _sc = 0;
+    }}
+    _ph = h;
+  }}
+
   await page.pdf({{
     path: {json.dumps(output_path)},
     format: {json.dumps(format)},
