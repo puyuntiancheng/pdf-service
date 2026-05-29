@@ -85,9 +85,14 @@ COPY pdf-service.py .
 # Non-root user
 RUN groupadd -g 1000 appuser && \
     useradd -u 1000 -g appuser -m -s /bin/bash appuser && \
-    chown -R appuser:appuser /app && \
-    # 给 appuser 授权访问 /root 目录（浏览器安装在这里）
-    chmod -R 755 /root
+    chown -R appuser:appuser /app
+
+# Give appuser access to /root (browsers installed there)
+RUN chmod -R 755 /root
+
+# Ensure output directory is writable
+RUN chown -R appuser:appuser /app/pdf-service-output
+
 USER appuser
 
 EXPOSE 8912
