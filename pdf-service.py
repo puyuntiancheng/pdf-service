@@ -39,7 +39,7 @@ PLAYWRIGHT_DIR = os.environ.get("PLAYWRIGHT_DIR", "/usr/local/lib/node_modules/p
 # --- FastAPI App ---
 app = FastAPI(
     title="Web Page PDF & Screenshot Service",
-    version="3.2.0"
+    version="3.5.0"
 )
 
 
@@ -132,6 +132,7 @@ def render_page(
     landscape: bool = False,
     print_background: bool = True,
     margin: dict = None,
+    max_retries: int = 2,
 ) -> dict:
     """Use Node.js Playwright to render URL to PDF or image."""
     if margin is None:
@@ -146,6 +147,7 @@ def render_page(
     # to avoid layout issues with vh/CSS/JS-dependent elements
     initial_height = height if height > 0 else 1024
 
+    script_path = os.path.join("/tmp", f"render_{uuid.uuid4().hex[:8]}.js")
     node_script = f"""
 const {{ chromium }} = require('playwright');
 
@@ -245,9 +247,16 @@ const {{ chromium }} = require('playwright');
     _ph = h;
   }}
 
+  // For PDF output, use custom page size instead of fixed format (A4)
+  // to avoid proportion distortion when rendering mobile viewport layouts.
+  // We calculate the page dimensions based on content height and viewport width.
+  const pageWidthMM = {width} * 0.2646; // px to mm at 96dpi
+  const pageHeightMM = viewHeight * 0.2646;
+
   await page.pdf({{
     path: {json.dumps(output_path)},
-    format: {json.dumps(format)},
+    width: pageWidthMM.toFixed(2) + 'mm',
+    height: pageHeightMM.toFixed(2) + 'mm',
     landscape: {json.dumps(landscape)},
     printBackground: {json.dumps(print_background)},
     margin: {{
@@ -273,14 +282,13 @@ const {{ chromium }} = require('playwright');
 })();
 """
 
-    script_path = os.path.join("/tmp", f"render_{uuid.uuid4().hex[:8]}.js")
-    with open(script_path, 'w', encoding='utf-8') as f:
-        f.write(node_script)
-
-    start_time = time.time()
     output_path = os.path.abspath(output_path)
 
-    try:
+    def _execute_script():
+        """Write script and execute via Node.js subprocess."""
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(node_script)
+
         env = os.environ.copy()
         env["NODE_PATH"] = PLAYWRIGHT_DIR + ":" + os.path.join(PLAYWRIGHT_DIR, "node_modules")
         result = subprocess.run(
@@ -291,36 +299,64 @@ const {{ chromium }} = require('playwright');
             text=True,
             timeout=180
         )
+        return result
 
-        duration = time.time() - start_time
-        if result.returncode != 0:
-            raise Exception(f"Playwright error: {result.stderr[:500]}")
+    start_time = time.time()
+    last_error = None
 
-        if not os.path.exists(output_path):
-            raise Exception(f"Output file not created at {output_path}")
-
-        file_size = os.path.getsize(output_path)
-        kind = "PDF" if is_pdf else "Screenshot"
-        print(f"{kind} generated: {output_path} ({file_size / 1024:.1f} KB, {duration:.1f}s)")
-
-        return {"success": True, "file_path": output_path, "file_size": file_size, "duration": round(duration, 2)}
-
-    except subprocess.TimeoutExpired:
-        raise Exception(f"Timeout after {time.time() - start_time:.0f}s")
-    except Exception as e:
-        raise Exception(f"Failed to render: {str(e)}")
-    finally:
+    for attempt in range(max_retries + 1):
+        result = None
         try:
-            os.remove(script_path)
-        except:
-            pass
+            result = _execute_script()
+            duration = time.time() - start_time
+
+            if result.returncode != 0:
+                stderr = result.stderr[:500]
+                # Retry on ERR_EMPTY_RESPONSE (transient network failure)
+                if "ERR_EMPTY_RESPONSE" in stderr and attempt < max_retries:
+                    print(f"Retry {attempt + 1}/{max_retries}: ERR_EMPTY_RESPONSE, retrying...")
+                    # Clean up partial output
+                    try:
+                        os.remove(output_path)
+                    except:
+                        pass
+                    continue
+                raise Exception(f"Playwright error: {stderr}")
+
+            if not os.path.exists(output_path):
+                raise Exception(f"Output file not created at {output_path}")
+
+            file_size = os.path.getsize(output_path)
+            kind = "PDF" if is_pdf else "Screenshot"
+            retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
+            print(f"{kind} generated: {output_path} ({file_size / 1024:.1f} KB, {duration:.1f}s){retry_note}")
+
+            return {"success": True, "file_path": output_path, "file_size": file_size, "duration": round(duration, 2)}
+
+        except subprocess.TimeoutExpired:
+            last_error = f"Timeout after {time.time() - start_time:.0f}s"
+            if attempt < max_retries:
+                print(f"Retry {attempt + 1}/{max_retries}: Timeout, retrying...")
+                continue
+            raise Exception(last_error)
+        except Exception as e:
+            last_error = str(e)
+            # Don't retry on non-network errors
+            break
+        finally:
+            try:
+                os.remove(script_path)
+            except:
+                pass
+
+    raise Exception(f"Failed to render: {last_error}")
 
 
 @app.get("/")
 def root():
     return {
         "service": "Web Page PDF & Screenshot Service",
-        "version": "3.2.0",
+        "version": "3.5.0",
         "endpoints": {
             "POST /api/render": "Render URL to PDF or Screenshot (JSON body)",
             "GET /api/render/download/{filename}": "Download generated file",
@@ -373,6 +409,7 @@ async def create_output(request: Request):
     oss_path_param = get_str("oss_path")
     oss_override_bucket = get_str("oss_override_bucket")
     oss_override_endpoint = get_str("oss_override_endpoint")
+    max_retries = get_int("max_retries", 2)
 
     if not url:
         raise HTTPException(status_code=400, detail="url is required")
@@ -403,7 +440,7 @@ async def create_output(request: Request):
             url=url, output_path=output_path, output_type=output_type,
             image_format=image_format, scale=scale, width=width, height=height,
             format=pdf_format, landscape=landscape, print_background=print_background,
-            margin=margin
+            margin=margin, max_retries=max_retries
         )
 
         oss_url = ""
