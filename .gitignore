@@ -11,3 +11,4 @@ __pycache__/
 # Docker
 *.tar
 proxy.py\nrender_worker.py
+.idea/

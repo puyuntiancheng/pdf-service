@@ -27,6 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     && localedef -i zh_CN -c -f UTF-8 -A /usr/share/locale/locale.alias zh_CN.UTF-8 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Copy system CJK fonts (from fonts/ directory — put msyh.ttc etc. here)
+COPY fonts/ /usr/share/fonts/truetype/
+RUN fc-cache -fv
+
 ENV LANG=zh_CN.UTF-8 \
     LANGUAGE=zh_CN:zh \
     LC_ALL=zh_CN.UTF-8
@@ -70,6 +74,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     fonts-wqy-zenhei fonts-wqy-microhei locales \
     && localedef -i zh_CN -c -f UTF-8 -A /usr/share/locale/locale.alias zh_CN.UTF-8 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy system CJK fonts (from fonts/ directory — put msyh.ttc etc. here)
+COPY fonts/ /usr/share/fonts/truetype/
+RUN fc-cache -fv
 
 ENV LANG=zh_CN.UTF-8 \
     LANGUAGE=zh_CN:zh \
