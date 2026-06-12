@@ -133,6 +133,7 @@ def render_page(
     print_background: bool = True,
     margin: dict = None,
     max_retries: int = 2,
+    force_overflow_visible: bool = False,
 ) -> dict:
     """Use Node.js Playwright to render URL to PDF or image."""
     if margin is None:
@@ -163,6 +164,10 @@ const {{ chromium }} = require('playwright');
     userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
   }});
 
+  if ({json.dumps(is_pdf)}) {{
+    await page.emulateMedia({{ media: 'screen' }});
+  }}
+
   console.log('Loading:', {json.dumps(url)});
   await page.goto({json.dumps(url)}, {{ waitUntil: 'networkidle', timeout: 90000 }});
 
@@ -178,35 +183,113 @@ const {{ chromium }} = require('playwright');
   }}
   await page.waitForTimeout(2000);
 
-  // Remove overflow constraints from structural containers,
-  // but preserve text-truncation overflow (ellipsis / line-clamp)
-  await page.evaluate(() => {{
-    const all = document.querySelectorAll('*');
-    all.forEach(el => {{
-      const s = window.getComputedStyle(el);
+  if ({json.dumps(is_pdf)}) {{
+    const expandedCount = await page.evaluate(() => {{
+      const viewportH = window.innerHeight || 1024;
+      const minVisibleHeight = Math.max(280, viewportH * 0.3);
+      let expanded = 0;
+      const details = [];
+      const clippingValues = ['hidden', 'auto', 'scroll'];
 
-      // Preserve text-truncation: text-overflow: ellipsis (single-line)
-      // and -webkit-line-clamp (multi-line)
-      const hasEllipsis = s.textOverflow === 'ellipsis';
-      const hasLineClamp = s.webkitLineClamp !== 'none' && s.webkitLineClamp !== '0';
-      if (hasEllipsis || hasLineClamp) {{
-        return; // skip text-truncation elements
-      }}
+      const makePrintable = (node, targetHeight, isTarget) => {{
+        if (!node || !node.style) return;
+        const cs = window.getComputedStyle(node);
+        node.style.setProperty('max-height', 'none', 'important');
+        node.style.setProperty('overflow-y', 'visible', 'important');
+        node.style.setProperty('contain', 'none', 'important');
+        if (isTarget) {{
+          node.style.setProperty('height', targetHeight + 'px', 'important');
+          node.style.setProperty('min-height', targetHeight + 'px', 'important');
+        }} else if (clippingValues.includes(cs.overflowY) || clippingValues.includes(cs.overflow)) {{
+          node.style.setProperty('height', 'auto', 'important');
+        }}
+        if (['fixed', 'sticky', 'absolute'].includes(cs.position)) {{
+          node.style.setProperty('position', 'relative', 'important');
+          node.style.setProperty('top', 'auto', 'important');
+          node.style.setProperty('bottom', 'auto', 'important');
+          node.style.setProperty('left', 'auto', 'important');
+          node.style.setProperty('right', 'auto', 'important');
+        }}
+      }};
 
-      if (s.overflow === 'hidden' || s.overflow === 'auto' || s.overflow === 'scroll' ||
-          s.overflowY === 'hidden' || s.overflowY === 'auto' || s.overflowY === 'scroll') {{
-        el.style.setProperty('overflow', 'visible', 'important');
-        el.style.setProperty('overflow-y', 'visible', 'important');
-      }}
-      if (s.overflowX === 'hidden' || s.overflowX === 'auto' || s.overflowX === 'scroll') {{
-        el.style.setProperty('overflow-x', 'visible', 'important');
-      }}
+      document.querySelectorAll('body, body *').forEach(el => {{
+        if (!el || !el.tagName) return;
+        if (['SCRIPT', 'STYLE', 'LINK', 'META', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return;
+
+        const s = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const overflowY = s.overflowY || s.overflow;
+        const canClipY = clippingValues.includes(overflowY);
+        const clippedY = el.scrollHeight > el.clientHeight + 8;
+        const meaningfulContainer = rect.height >= minVisibleHeight || el.scrollHeight >= viewportH * 1.2;
+
+        if (canClipY && clippedY && meaningfulContainer) {{
+          const targetHeight = el.scrollHeight;
+          makePrintable(el, targetHeight, true);
+
+          let parent = el.parentElement;
+          let depth = 0;
+          while (parent && parent !== document.documentElement && depth < 8) {{
+            makePrintable(parent, targetHeight, false);
+            parent = parent.parentElement;
+            depth++;
+          }}
+
+          details.push({{
+            tag: el.tagName,
+            id: el.id || '',
+            className: String(el.className || '').slice(0, 120),
+            position: s.position,
+            overflowY,
+            clientHeight: el.clientHeight,
+            scrollHeight: targetHeight
+          }});
+          expanded++;
+        }}
+      }});
+
+      document.documentElement.style.setProperty('height', 'auto', 'important');
+      document.body.style.setProperty('height', 'auto', 'important');
+      document.documentElement.style.setProperty('max-height', 'none', 'important');
+      document.body.style.setProperty('max-height', 'none', 'important');
+      document.documentElement.style.setProperty('overflow-y', 'visible', 'important');
+      document.body.style.setProperty('overflow-y', 'visible', 'important');
+      return {{ expanded, details: details.slice(0, 5) }};
     }});
-    document.body.style.setProperty('overflow', 'visible', 'important');
-    document.documentElement.style.setProperty('overflow', 'visible', 'important');
-  }});
+    console.log('Expanded scroll containers:', JSON.stringify(expandedCount));
+  }}
 
-  // Wait for layout to stabilize after overflow removal (max 8s)
+  if ({json.dumps(force_overflow_visible)}) {{
+    // Optional compatibility mode: expand overflow containers when callers need
+    // long-form captures. It is disabled by default because it can break layout.
+    await page.evaluate(() => {{
+      const all = document.querySelectorAll('*');
+      all.forEach(el => {{
+        const s = window.getComputedStyle(el);
+
+        // Preserve text-truncation: text-overflow: ellipsis (single-line)
+        // and -webkit-line-clamp (multi-line)
+        const hasEllipsis = s.textOverflow === 'ellipsis';
+        const hasLineClamp = s.webkitLineClamp !== 'none' && s.webkitLineClamp !== '0';
+        if (hasEllipsis || hasLineClamp) {{
+          return; // skip text-truncation elements
+        }}
+
+        if (s.overflow === 'hidden' || s.overflow === 'auto' || s.overflow === 'scroll' ||
+            s.overflowY === 'hidden' || s.overflowY === 'auto' || s.overflowY === 'scroll') {{
+          el.style.setProperty('overflow', 'visible', 'important');
+          el.style.setProperty('overflow-y', 'visible', 'important');
+        }}
+        if (s.overflowX === 'hidden' || s.overflowX === 'auto' || s.overflowX === 'scroll') {{
+          el.style.setProperty('overflow-x', 'visible', 'important');
+        }}
+      }});
+      document.body.style.setProperty('overflow', 'visible', 'important');
+      document.documentElement.style.setProperty('overflow', 'visible', 'important');
+    }});
+  }}
+
+  // Wait for layout to stabilize after resource loading and optional adjustments (max 8s)
   let prevHeight = 0, stableCount = 0;
   for (let i = 0; i < 40; i++) {{
     await page.waitForTimeout(200);
@@ -220,17 +303,55 @@ const {{ chromium }} = require('playwright');
     prevHeight = h;
   }}
 
-  const actualHeight = await page.evaluate(() => Math.max(
-    document.body.scrollHeight, document.body.offsetHeight,
-    document.documentElement.scrollHeight, document.documentElement.offsetHeight
-  ));
+  let actualHeight = await page.evaluate(() => {{
+    let maxBottom = 0;
+    document.querySelectorAll('body, body *').forEach(el => {{
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0) {{
+        maxBottom = Math.max(maxBottom, rect.bottom + window.scrollY);
+      }}
+    }});
+    return Math.ceil(Math.max(
+      maxBottom,
+      document.body.scrollHeight, document.body.offsetHeight,
+      document.documentElement.scrollHeight, document.documentElement.offsetHeight
+    ));
+  }});
   console.log('Content height:', actualHeight);
+
+  if ({json.dumps(is_pdf)}) {{
+    const viewportH = await page.evaluate(() => window.innerHeight || {initial_height});
+    const maxSteps = 80;
+    const step = Math.max(600, Math.floor(viewportH * 0.8));
+    for (let y = 0, i = 0; y < actualHeight && i < maxSteps; y += step, i++) {{
+      await page.evaluate(pos => window.scrollTo(0, pos), y);
+      await page.waitForTimeout(60);
+    }}
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(300);
+    actualHeight = await page.evaluate(() => {{
+      let maxBottom = 0;
+      document.querySelectorAll('body, body *').forEach(el => {{
+        const rect = el.getBoundingClientRect();
+        if (rect.height > 0) {{
+          maxBottom = Math.max(maxBottom, rect.bottom + window.scrollY);
+        }}
+      }});
+      return Math.ceil(Math.max(
+        maxBottom,
+        document.body.scrollHeight, document.body.offsetHeight,
+        document.documentElement.scrollHeight, document.documentElement.offsetHeight
+      ));
+    }});
+    console.log('Content height after lazy-load scroll:', actualHeight);
+  }}
 
 """
     if is_pdf:
         node_script += f"""
-  // Resize viewport to full content height for PDF capture
-  const viewHeight = {height} > 0 ? {height} : Math.max(actualHeight, 6000);
+  // Keep the screen viewport height stable so vh/fixed/sticky layouts do not
+  // recalculate into a single huge viewport. PDF pagination handles length.
+  const viewHeight = {height} > 0 ? {height} : {initial_height};
   await page.setViewportSize({{ width: {width}, height: viewHeight }});
 
   // Wait for layout to stabilize after viewport resize (max 8s)
@@ -247,11 +368,73 @@ const {{ chromium }} = require('playwright');
     _ph = h;
   }}
 
-  // For PDF output, use custom page size instead of fixed format (A4)
-  // to avoid proportion distortion when rendering mobile viewport layouts.
-  // We calculate the page dimensions based on content height and viewport width.
+  // Use a viewport-width paper size and full content height. This keeps the
+  // generated PDF visually aligned with the long PNG output and avoids Chrome
+  // pagination slicing cards or charts in the middle.
   const pageWidthMM = {width} * 0.2646; // px to mm at 96dpi
-  const pageHeightMM = viewHeight * 0.2646;
+  const pageRatios = {{
+    A3: 420 / 297,
+    A4: 297 / 210,
+    Letter: 11 / 8.5,
+    Legal: 14 / 8.5
+  }};
+  const pageRatio = pageRatios[{json.dumps(format)}] || pageRatios.A4;
+  const pageHeightMM = ({height} > 0 ? {height} * 0.2646 : Math.max(actualHeight, viewHeight) * 0.2646);
+  const pageHeightPx = ({height} > 0 ? {height} : {width} * pageRatio);
+
+  await page.addStyleTag({{
+    content: `
+      .pdf-avoid-break {{
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+      }}
+      .pdf-avoid-break-before {{
+        break-before: auto !important;
+        page-break-before: auto !important;
+      }}
+    `
+  }});
+
+  const avoidBreakCount = await page.evaluate((pageHeightPx) => {{
+    const transparent = new Set(['rgba(0, 0, 0, 0)', 'transparent']);
+    const mark = (el) => {{
+      if (!el || !el.classList) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 120 || rect.height < 36 || rect.height > pageHeightPx * 0.86) return false;
+      el.classList.add('pdf-avoid-break');
+      return true;
+    }};
+
+    let count = 0;
+
+    const report = document.querySelector('#report-content');
+    if (report) {{
+      Array.from(report.children).forEach(child => {{
+        if (mark(child)) count++;
+        Array.from(child.children || []).forEach(grandChild => {{
+          if (mark(grandChild)) count++;
+        }});
+      }});
+    }}
+
+    document.querySelectorAll('body *').forEach(el => {{
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 120 || rect.height < 48 || rect.height > pageHeightPx * 0.72) return;
+      const s = window.getComputedStyle(el);
+      const hasBackground = !transparent.has(s.backgroundColor);
+      const hasRadius = parseFloat(s.borderTopLeftRadius) > 0 || parseFloat(s.borderTopRightRadius) > 0;
+      const hasShadow = s.boxShadow && s.boxShadow !== 'none';
+      const hasBorder = ['Top', 'Right', 'Bottom', 'Left'].some(side => parseFloat(s[`border${{side}}Width`]) > 0);
+      const hasCardClass = /card|item|box|panel|list|cell|col|row/i.test(String(el.className || ''));
+
+      if ((hasBackground || hasRadius || hasShadow || hasBorder || hasCardClass) && mark(el)) {{
+        count++;
+      }}
+    }});
+
+    return count;
+  }}, pageHeightPx);
+  console.log('Avoid-break blocks:', avoidBreakCount);
 
   await page.pdf({{
     path: {json.dumps(output_path)},
@@ -410,6 +593,7 @@ async def create_output(request: Request):
     oss_override_bucket = get_str("oss_override_bucket")
     oss_override_endpoint = get_str("oss_override_endpoint")
     max_retries = get_int("max_retries", 2)
+    force_overflow_visible = get_bool("force_overflow_visible", output_type in ("png", "jpg", "webp"))
 
     if not url:
         raise HTTPException(status_code=400, detail="url is required")
@@ -440,7 +624,8 @@ async def create_output(request: Request):
             url=url, output_path=output_path, output_type=output_type,
             image_format=image_format, scale=scale, width=width, height=height,
             format=pdf_format, landscape=landscape, print_background=print_background,
-            margin=margin, max_retries=max_retries
+            margin=margin, max_retries=max_retries,
+            force_overflow_visible=force_overflow_visible
         )
 
         oss_url = ""
