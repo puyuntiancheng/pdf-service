@@ -39,7 +39,7 @@ PLAYWRIGHT_DIR = os.environ.get("PLAYWRIGHT_DIR", "/usr/local/lib/node_modules/p
 # --- FastAPI App ---
 app = FastAPI(
     title="Web Page PDF & Screenshot Service",
-    version="3.5.1"
+    version="3.5.0"
 )
 
 
@@ -161,13 +161,7 @@ const {{ chromium }} = require('playwright');
 
   const page = await browser.newPage({{
     viewport: {{ width: {width}, height: {initial_height}, deviceScaleFactor: {json.dumps(actual_scale) if actual_scale else 2.0} }},
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-    extraHTTPHeaders: {{
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache'
-    }}
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
   }});
 
   if ({json.dumps(is_pdf)}) {{
@@ -175,40 +169,7 @@ const {{ chromium }} = require('playwright');
   }}
 
   console.log('Loading:', {json.dumps(url)});
-  async function gotoWithRetry(targetUrl) {{
-    const retryable = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_TIMED_OUT|ERR_HTTP2_PROTOCOL_ERROR|Navigation timeout/i;
-    let lastError = null;
-
-    for (let attempt = 1; attempt <= 4; attempt++) {{
-      try {{
-        const response = await page.goto(targetUrl, {{ waitUntil: 'domcontentloaded', timeout: 45000 }});
-        const status = response ? response.status() : 0;
-        console.log(`Navigation OK attempt=${{attempt}} status=${{status}} url=${{page.url()}}`);
-
-        try {{
-          await page.waitForLoadState('networkidle', {{ timeout: 12000 }});
-        }} catch (e) {{
-          console.log('Network idle wait timeout, proceeding after DOM ready...');
-        }}
-
-        return response;
-      }} catch (e) {{
-        lastError = e;
-        const message = e && e.stack ? e.stack : String(e);
-        console.error(`Navigation failed attempt=${{attempt}}: ${{message.slice(0, 1000)}}`);
-
-        if (!retryable.test(message) || attempt === 4) {{
-          throw e;
-        }}
-
-        await page.waitForTimeout(1000 * attempt);
-      }}
-    }}
-
-    throw lastError;
-  }}
-
-  await gotoWithRetry({json.dumps(url)});
+  await page.goto({json.dumps(url)}, {{ waitUntil: 'networkidle', timeout: 90000 }});
 
   // Wait for fonts + images to load, then short buffer for framework hydration
   try {{
@@ -533,18 +494,10 @@ const {{ chromium }} = require('playwright');
             duration = time.time() - start_time
 
             if result.returncode != 0:
-                stderr = result.stderr[:3000]
+                stderr = result.stderr[:500]
                 # Retry on ERR_EMPTY_RESPONSE (transient network failure)
-                retryable_errors = (
-                    "ERR_EMPTY_RESPONSE",
-                    "ERR_CONNECTION_RESET",
-                    "ERR_CONNECTION_CLOSED",
-                    "ERR_TIMED_OUT",
-                    "ERR_HTTP2_PROTOCOL_ERROR",
-                    "Navigation timeout",
-                )
-                if any(err in stderr for err in retryable_errors) and attempt < max_retries:
-                    print(f"Retry {attempt + 1}/{max_retries}: navigation network error, retrying...")
+                if "ERR_EMPTY_RESPONSE" in stderr and attempt < max_retries:
+                    print(f"Retry {attempt + 1}/{max_retries}: ERR_EMPTY_RESPONSE, retrying...")
                     # Clean up partial output
                     try:
                         os.remove(output_path)
@@ -586,7 +539,7 @@ const {{ chromium }} = require('playwright');
 def root():
     return {
         "service": "Web Page PDF & Screenshot Service",
-        "version": "3.5.1",
+        "version": "3.5.0",
         "endpoints": {
             "POST /api/render": "Render URL to PDF or Screenshot (JSON body)",
             "GET /api/render/download/{filename}": "Download generated file",
